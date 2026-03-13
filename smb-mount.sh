@@ -401,8 +401,8 @@ EOF
 main() {
     [[ $# -eq 0 ]] && usage 1
 
-    # Quick dep check (not for install/uninstall/help/version)
-    if [[ "$1" != "install" && "$1" != "uninstall" && "$1" != "help" && "$1" != "version" && "$1" != "-h" && "$1" != "--help" ]]; then
+    # Quick dep check (not for install/uninstall/help/version/server/log)
+    if [[ "$1" != "install" && "$1" != "uninstall" && "$1" != "help" && "$1" != "version" && "$1" != "-h" && "$1" != "--help" && "$1" != "server" && "$1" != "log" ]]; then
         if ! command -v smbclient &>/dev/null; then
             echo "smbclient not found. Run 'smb-mount install' first."
             return 1
