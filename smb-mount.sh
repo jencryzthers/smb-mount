@@ -229,6 +229,152 @@ discover_shares() {
     done
 }
 
+# --- Lockfile ---
+acquire_lock() {
+    if [[ -f "$PID_FILE" ]]; then
+        local old_pid
+        old_pid="$(cat "$PID_FILE" 2>/dev/null)"
+        if [[ -n "$old_pid" ]] && kill -0 "$old_pid" 2>/dev/null; then
+            log WARN "Another instance is running (PID $old_pid)"
+            return 1
+        fi
+        # Stale lockfile
+        rm -f "$PID_FILE"
+    fi
+    echo $$ > "$PID_FILE"
+    trap 'rm -f "$PID_FILE"' EXIT
+}
+
+release_lock() {
+    rm -f "$PID_FILE"
+}
+
+# --- Log rotation ---
+rotate_log() {
+    if [[ -f "$LOG_FILE" ]]; then
+        local size
+        size="$(stat -f%z "$LOG_FILE" 2>/dev/null || echo 0)"
+        if (( size > 1048576 )); then
+            : > "$LOG_FILE"
+            log INFO "Log rotated (was ${size} bytes)"
+        fi
+    fi
+}
+
+# --- Mount helpers ---
+is_mounted() {
+    local mount_point="$1"
+    mount | grep -q " on ${mount_point} " 2>/dev/null
+}
+
+mount_share() {
+    local server_name="$1" share="$2"
+
+    parse_server "$server_name"
+    local ip="${PARSED_SERVER[ip]}"
+    local domain="${PARSED_SERVER[domain]}"
+    local user="${PARSED_SERVER[user]}"
+    local mount_point="/Volumes/${server_name}/${share}"
+
+    # Skip if already mounted
+    if is_mounted "$mount_point"; then
+        log INFO "Already mounted: $mount_point"
+        return 0
+    fi
+
+    # Create mount point
+    if [[ ! -d "$mount_point" ]]; then
+        sudo mkdir -p "$mount_point" 2>/dev/null || mkdir -p "$mount_point" 2>/dev/null || {
+            log ERROR "Cannot create mount point: $mount_point"
+            return 1
+        }
+    fi
+
+    # Attempt mount — mount_smbfs reads Keychain automatically
+    local smb_url="//${domain};${user}@${ip}/${share}"
+
+    if mount_smbfs "$smb_url" "$mount_point" 2>/dev/null; then
+        log OK "Mounted: $mount_point"
+        return 0
+    fi
+
+    # If mount failed and interactive, try with explicit password
+    if [[ -t 0 ]]; then
+        local password=""
+        password="$(security find-internet-password -s "$server_name" -a "$user" -w 2>/dev/null)" || true
+
+        if [[ -z "$password" ]]; then
+            echo -n "Password for $domain\\$user on $server_name: "
+            read -rs password
+            echo
+
+            if mount_smbfs "//${domain};${user}:${password}@${ip}/${share}" "$mount_point" 2>/dev/null; then
+                log OK "Mounted: $mount_point"
+                # Offer to save
+                echo -n "Save password to Keychain? [Y/n] "
+                read -r yn
+                if [[ ! "$yn" =~ ^[Nn]$ ]]; then
+                    security add-internet-password -a "$user" -s "$server_name" -D "SMB" -r "smb " -w "$password" -U 2>/dev/null && \
+                        log OK "Password saved to Keychain" || \
+                        log WARN "Failed to save to Keychain"
+                fi
+                return 0
+            fi
+        else
+            if mount_smbfs "//${domain};${user}:${password}@${ip}/${share}" "$mount_point" 2>/dev/null; then
+                log OK "Mounted: $mount_point"
+                return 0
+            fi
+        fi
+    fi
+
+    log ERROR "Failed to mount: $mount_point"
+    # Clean up empty mount point
+    rmdir "$mount_point" 2>/dev/null
+    return 1
+}
+
+unmount_share() {
+    local mount_point="$1"
+
+    if ! is_mounted "$mount_point"; then
+        # Check if mount is dead/stale
+        if [[ -d "$mount_point" ]]; then
+            rmdir "$mount_point" 2>/dev/null
+        fi
+        return 0
+    fi
+
+    if umount "$mount_point" 2>/dev/null; then
+        log OK "Unmounted: $mount_point"
+    else
+        # Force unmount dead mount
+        umount -f "$mount_point" 2>/dev/null && \
+            log WARN "Force unmounted: $mount_point" || \
+            log ERROR "Failed to unmount: $mount_point"
+    fi
+
+    # Clean up empty directory
+    rmdir "$mount_point" 2>/dev/null
+}
+
+# Clean up stale mounts — mount points that exist but share no longer discovered
+cleanup_stale() {
+    local server_name="$1"
+    local discovered_shares="$2"
+    local server_vol="/Volumes/${server_name}"
+
+    [[ ! -d "$server_vol" ]] && return
+
+    for mount_point in "$server_vol"/*(N); do
+        local share_name="${mount_point:t}"
+        if ! echo "$discovered_shares" | grep -qx "$share_name"; then
+            log WARN "Stale mount detected: $mount_point"
+            unmount_share "$mount_point"
+        fi
+    done
+}
+
 # --- Usage ---
 usage() {
     cat <<'EOF'
@@ -352,8 +498,79 @@ cmd_server_remove() {
 }
 
 # --- Stub subcommands (to be implemented in subsequent tasks) ---
-cmd_mount()     { echo "mount: not yet implemented"; }
-cmd_unmount()   { echo "unmount: not yet implemented"; }
+cmd_mount() {
+    local target_server="${1:-}"
+
+    ensure_config_dir
+    rotate_log
+    acquire_lock || return 1
+
+    local servers
+    if [[ -n "$target_server" ]]; then
+        servers="$target_server"
+    else
+        servers="$(list_servers)"
+    fi
+
+    if [[ -z "$servers" ]]; then
+        echo "No servers configured. Add one with: smb-mount server add <name> <ip> --domain <domain> --user <user>"
+        release_lock
+        return 1
+    fi
+
+    local server_name
+    for server_name in ${(f)servers}; do
+        log INFO "Processing server: $server_name"
+
+        local shares
+        shares="$(discover_shares "$server_name" 2>/dev/null)" || continue
+
+        if [[ -z "$shares" ]]; then
+            log WARN "No shares found on $server_name"
+            continue
+        fi
+
+        # Mount each share
+        local share
+        for share in ${(f)shares}; do
+            mount_share "$server_name" "$share"
+        done
+
+        # Clean up stale mounts
+        cleanup_stale "$server_name" "$shares"
+    done
+
+    release_lock
+}
+
+cmd_unmount() {
+    local target_server="${1:-}"
+
+    local servers
+    if [[ -n "$target_server" ]]; then
+        servers="$target_server"
+    else
+        servers="$(list_servers)"
+    fi
+
+    if [[ -z "$servers" ]]; then
+        echo "No servers configured."
+        return 0
+    fi
+
+    local server_name
+    for server_name in ${(f)servers}; do
+        local server_vol="/Volumes/${server_name}"
+        [[ ! -d "$server_vol" ]] && continue
+
+        for mount_point in "$server_vol"/*(N); do
+            unmount_share "$mount_point"
+        done
+
+        # Remove server directory if empty
+        rmdir "$server_vol" 2>/dev/null
+    done
+}
 cmd_status()    { echo "status: not yet implemented"; }
 cmd_shares() {
     local server_name="${1:-}"
