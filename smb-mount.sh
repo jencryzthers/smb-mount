@@ -640,6 +640,17 @@ cmd_shares() {
 }
 cmd_install()   { echo "install: not yet implemented"; }
 cmd_uninstall() { echo "uninstall: not yet implemented"; }
-cmd_log()       { echo "log: not yet implemented"; }
+cmd_log() {
+    if [[ ! -f "$LOG_FILE" ]]; then
+        echo "No log file yet. Run 'smb-mount mount' first."
+        return 0
+    fi
+
+    if [[ "${1:-}" == "-f" || "${1:-}" == "--follow" ]]; then
+        tail -f "$LOG_FILE"
+    else
+        tail -50 "$LOG_FILE"
+    fi
+}
 
 main "$@"
