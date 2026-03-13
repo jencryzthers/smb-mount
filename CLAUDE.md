@@ -15,6 +15,28 @@ macOS CLI tool (`smb-mount`) that auto-discovers and mounts SMB shares from Wind
 - Primary server: GOXSRV01 (10.88.3.1), domain: gox.ca, user: jcproulx
 - Credentials stored in macOS Keychain
 
+## Quickstart
+
+```bash
+# Install (sets up deps, config, LaunchAgent)
+./smb-mount.sh install
+
+# Add your server
+smb-mount server add GOXSRV01 10.88.3.1 --domain gox.ca --user jcproulx
+
+# Discover available shares
+smb-mount shares GOXSRV01
+
+# Mount all shares
+smb-mount mount
+
+# Check what's mounted
+smb-mount status
+
+# Open in Finder
+open /Volumes/GOXSRV01
+```
+
 ## Architecture
 
 ```
@@ -80,6 +102,8 @@ smb-mount log                       # tail log file
 
 ## Testing
 
+- Syntax check: `zsh -n smb-mount.sh`
+- Basic smoke tests: `./smb-mount.sh version`, `./smb-mount.sh help`, `./smb-mount.sh status`
 - Test with `smb-mount shares GOXSRV01` first (discovery without mounting)
 - Use `smb-mount status` to verify mounts
 - Check `smb-mount log` for daemon behavior after install

@@ -1,5 +1,5 @@
 #!/bin/zsh
-set -euo pipefail
+set -o pipefail
 
 # --- Globals ---
 readonly VERSION="1.0.0"
@@ -400,6 +400,14 @@ EOF
 # --- Main dispatch ---
 main() {
     [[ $# -eq 0 ]] && usage 1
+
+    # Quick dep check (not for install/uninstall/help/version)
+    if [[ "$1" != "install" && "$1" != "uninstall" && "$1" != "help" && "$1" != "version" && "$1" != "-h" && "$1" != "--help" ]]; then
+        if ! command -v smbclient &>/dev/null; then
+            echo "smbclient not found. Run 'smb-mount install' first."
+            return 1
+        fi
+    fi
 
     local cmd="$1"; shift
 
