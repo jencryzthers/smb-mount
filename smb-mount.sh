@@ -571,7 +571,46 @@ cmd_unmount() {
         rmdir "$server_vol" 2>/dev/null
     done
 }
-cmd_status()    { echo "status: not yet implemented"; }
+cmd_status() {
+    local servers
+    servers="$(list_servers)"
+
+    if [[ -z "$servers" ]]; then
+        echo "No servers configured."
+        return 0
+    fi
+
+    local server_name
+    for server_name in ${(f)servers}; do
+        parse_server "$server_name"
+
+        # Reachability check
+        local reachable="unreachable"
+        if ping -c1 -W2 "${PARSED_SERVER[ip]}" &>/dev/null; then
+            reachable="reachable"
+        fi
+
+        local status_color="\033[31m"
+        [[ "$reachable" == "reachable" ]] && status_color="\033[32m"
+        echo "${status_color}[$reachable]\033[0m $server_name (${PARSED_SERVER[ip]}) — ${PARSED_SERVER[domain]}\\${PARSED_SERVER[user]}"
+
+        # List mounted shares
+        local server_vol="/Volumes/${server_name}"
+        if [[ -d "$server_vol" ]]; then
+            for mount_point in "$server_vol"/*(N); do
+                local share_name="${mount_point:t}"
+                if is_mounted "$mount_point"; then
+                    echo "  \033[32m●\033[0m $share_name"
+                else
+                    echo "  \033[31m○\033[0m $share_name (not mounted)"
+                fi
+            done
+        else
+            echo "  No shares mounted"
+        fi
+        echo
+    done
+}
 cmd_shares() {
     local server_name="${1:-}"
     if [[ -z "$server_name" ]]; then
