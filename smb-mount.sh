@@ -126,6 +126,109 @@ remove_server_from_conf() {
     mv "$tmpfile" "$SERVERS_CONF"
 }
 
+# --- Exclusions ---
+ensure_exclusions() {
+    if [[ ! -f "$EXCLUSIONS_CONF" ]]; then
+        ensure_config_dir
+        cat > "$EXCLUSIONS_CONF" <<'EXCL'
+IPC$
+ADMIN$
+C$
+D$
+print$
+NETLOGON
+SYSVOL
+EXCL
+        log INFO "Created default exclusions: $EXCLUSIONS_CONF"
+    fi
+}
+
+is_excluded() {
+    local share="$1"
+    ensure_exclusions
+    while IFS= read -r pattern || [[ -n "$pattern" ]]; do
+        [[ -z "$pattern" || "$pattern" =~ ^# ]] && continue
+        # Case-insensitive match
+        if [[ "${share:l}" == "${pattern:l}" ]]; then
+            return 0
+        fi
+    done < "$EXCLUSIONS_CONF"
+    return 1
+}
+
+# --- Discovery ---
+# Discover shares on a server. Outputs one share name per line (Disk type only, not excluded).
+discover_shares() {
+    local server_name="$1"
+    typeset -gA PARSED_SERVER
+    PARSED_SERVER=()
+
+    if ! parse_server "$server_name"; then
+        log ERROR "Server not configured: $server_name"
+        return 1
+    fi
+
+    local ip="${PARSED_SERVER[ip]}"
+    local domain="${PARSED_SERVER[domain]}"
+    local user="${PARSED_SERVER[user]}"
+
+    # Check reachability
+    if ! ping -c1 -W2 "$ip" &>/dev/null; then
+        log WARN "Server unreachable: $server_name ($ip)"
+        return 1
+    fi
+
+    # Run smbclient -L to list shares
+    # Try Keychain password first (via security find-internet-password)
+    local password=""
+    password="$(security find-internet-password -s "$server_name" -a "$user" -w 2>/dev/null)" || true
+
+    local smb_output=""
+    if [[ -n "$password" ]]; then
+        smb_output="$(smbclient -L "//$ip" -U "$domain/$user%$password" --no-pass 2>/dev/null)" || \
+        smb_output="$(smbclient -L "//$ip" -U "$domain/$user" --password="$password" 2>/dev/null)" || true
+    fi
+
+    # If no password or smbclient failed, try without (Kerberos/guest)
+    if [[ -z "$smb_output" ]]; then
+        smb_output="$(smbclient -L "//$ip" -U "$domain/$user" -N 2>/dev/null)" || true
+    fi
+
+    # If still empty and interactive, prompt for password
+    if [[ -z "$smb_output" ]] && [[ -t 0 ]]; then
+        echo -n "Password for $domain\\$user on $server_name: "
+        read -rs password
+        echo
+        smb_output="$(smbclient -L "//$ip" -U "$domain/$user%$password" 2>/dev/null)" || true
+
+        if [[ -n "$smb_output" ]]; then
+            echo -n "Save password to Keychain? [Y/n] "
+            read -r yn
+            if [[ ! "$yn" =~ ^[Nn]$ ]]; then
+                security add-internet-password -a "$user" -s "$server_name" -D "SMB" -r "smb " -w "$password" -U 2>/dev/null && \
+                    log OK "Password saved to Keychain for $server_name" || \
+                    log WARN "Failed to save password to Keychain"
+            fi
+        fi
+    fi
+
+    if [[ -z "$smb_output" ]]; then
+        log ERROR "Could not list shares on $server_name — authentication failed"
+        return 1
+    fi
+
+    # Parse smbclient output: lines like "  ShareName    Disk    Comment here"
+    echo "$smb_output" | while IFS= read -r line; do
+        # Match lines with share name, type Disk
+        if [[ "$line" =~ "^[[:space:]]+([^[:space:]]+)[[:space:]]+Disk" ]]; then
+            local share_name="${match[1]}"
+            if ! is_excluded "$share_name"; then
+                echo "$share_name"
+            fi
+        fi
+    done
+}
+
 # --- Usage ---
 usage() {
     cat <<'EOF'
@@ -252,7 +355,33 @@ cmd_server_remove() {
 cmd_mount()     { echo "mount: not yet implemented"; }
 cmd_unmount()   { echo "unmount: not yet implemented"; }
 cmd_status()    { echo "status: not yet implemented"; }
-cmd_shares()    { echo "shares: not yet implemented"; }
+cmd_shares() {
+    local server_name="${1:-}"
+    if [[ -z "$server_name" ]]; then
+        echo "Usage: smb-mount shares <server>"
+        return 1
+    fi
+
+    if ! parse_server "$server_name"; then
+        echo "Server not configured: $server_name"
+        echo "Add it with: smb-mount server add $server_name <ip> --domain <domain> --user <user>"
+        return 1
+    fi
+
+    log INFO "Discovering shares on $server_name (${PARSED_SERVER[ip]})..."
+    local shares
+    shares="$(discover_shares "$server_name")"
+
+    if [[ -z "$shares" ]]; then
+        echo "No accessible shares found on $server_name"
+        return 0
+    fi
+
+    echo "Shares on $server_name:"
+    echo "$shares" | while IFS= read -r share; do
+        printf "  %s\n" "$share"
+    done
+}
 cmd_install()   { echo "install: not yet implemented"; }
 cmd_uninstall() { echo "uninstall: not yet implemented"; }
 cmd_log()       { echo "log: not yet implemented"; }
