@@ -638,8 +638,129 @@ cmd_shares() {
         printf "  %s\n" "$share"
     done
 }
-cmd_install()   { echo "install: not yet implemented"; }
-cmd_uninstall() { echo "uninstall: not yet implemented"; }
+cmd_install() {
+    echo "=== smb-mount installer ==="
+    echo
+
+    # 1. Check/install smbclient
+    if ! command -v smbclient &>/dev/null; then
+        echo "smbclient not found. Installing samba via Homebrew..."
+        if command -v brew &>/dev/null; then
+            brew install samba
+        else
+            echo "Homebrew not found. Please install samba manually: brew install samba"
+            return 1
+        fi
+    else
+        echo "[OK] smbclient found: $(which smbclient)"
+    fi
+
+    # 2. Create config directory with defaults
+    ensure_config_dir
+    ensure_exclusions
+    echo "[OK] Config directory: $CONFIG_DIR"
+
+    # 3. Symlink script
+    local script_path
+    script_path="$(cd "$(dirname "$0")" && pwd)/$(basename "$0")"
+
+    if [[ -L "$INSTALL_PATH" || -f "$INSTALL_PATH" ]]; then
+        echo "[OK] Already installed at $INSTALL_PATH"
+    else
+        echo "Installing to $INSTALL_PATH (requires sudo)..."
+        sudo ln -sf "$script_path" "$INSTALL_PATH"
+        echo "[OK] Symlinked to $INSTALL_PATH"
+    fi
+
+    # 4. Generate and load LaunchAgent
+    cat > "$PLIST_PATH" <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>${PLIST_NAME}</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>${INSTALL_PATH}</string>
+        <string>mount</string>
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>WatchPaths</key>
+    <array>
+        <string>/Library/Preferences/SystemConfiguration</string>
+    </array>
+    <key>ThrottleInterval</key>
+    <integer>30</integer>
+    <key>StandardOutPath</key>
+    <string>${LOG_FILE}</string>
+    <key>StandardErrorPath</key>
+    <string>${LOG_FILE}</string>
+</dict>
+</plist>
+PLIST
+
+    # Load the agent
+    launchctl unload "$PLIST_PATH" 2>/dev/null || true
+    launchctl load "$PLIST_PATH"
+    echo "[OK] LaunchAgent loaded: $PLIST_NAME"
+
+    echo
+    echo "=== Installation complete ==="
+    echo
+
+    # 5. Check if servers configured
+    if [[ -z "$(list_servers)" ]]; then
+        echo "No servers configured yet. Add one now:"
+        echo "  smb-mount server add GOXSRV01 10.88.3.1 --domain gox.ca --user jcproulx"
+    else
+        echo "Configured servers:"
+        cmd_server_list
+        echo
+        echo "Run 'smb-mount mount' to connect now, or it will auto-connect on next network change."
+    fi
+}
+
+cmd_uninstall() {
+    echo "=== smb-mount uninstaller ==="
+    echo
+
+    # 1. Unload LaunchAgent
+    if [[ -f "$PLIST_PATH" ]]; then
+        launchctl unload "$PLIST_PATH" 2>/dev/null || true
+        rm -f "$PLIST_PATH"
+        echo "[OK] LaunchAgent removed"
+    else
+        echo "[SKIP] No LaunchAgent found"
+    fi
+
+    # 2. Remove symlink
+    if [[ -L "$INSTALL_PATH" || -f "$INSTALL_PATH" ]]; then
+        sudo rm -f "$INSTALL_PATH"
+        echo "[OK] Removed $INSTALL_PATH"
+    fi
+
+    # 3. Optionally remove config
+    if [[ -t 0 ]]; then
+        echo -n "Remove config directory ($CONFIG_DIR)? [y/N] "
+        read -r yn
+        if [[ "$yn" =~ ^[Yy]$ ]]; then
+            rm -rf "$CONFIG_DIR"
+            echo "[OK] Config removed"
+        fi
+
+        echo -n "Unmount all shares? [y/N] "
+        read -r yn
+        if [[ "$yn" =~ ^[Yy]$ ]]; then
+            cmd_unmount
+            echo "[OK] All shares unmounted"
+        fi
+    fi
+
+    echo
+    echo "=== Uninstall complete ==="
+}
 cmd_log() {
     if [[ ! -f "$LOG_FILE" ]]; then
         echo "No log file yet. Run 'smb-mount mount' first."
