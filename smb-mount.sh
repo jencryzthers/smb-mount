@@ -650,25 +650,46 @@ cmd_install() {
     echo "=== smb-mount installer ==="
     echo
 
-    # 1. Check/install smbclient
+    # 1. Check/install Homebrew
+    if ! command -v brew &>/dev/null; then
+        echo "Homebrew not found. Installing..."
+        /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+        # Add brew to PATH for Apple Silicon
+        if [[ -f "/opt/homebrew/bin/brew" ]]; then
+            eval "$(/opt/homebrew/bin/brew shellenv)"
+        elif [[ -f "/usr/local/bin/brew" ]]; then
+            eval "$(/usr/local/bin/brew shellenv)"
+        fi
+        if command -v brew &>/dev/null; then
+            echo "[OK] Homebrew installed"
+        else
+            echo "[ERROR] Homebrew installation failed. Install manually: https://brew.sh"
+            return 1
+        fi
+    else
+        echo "[OK] Homebrew found: $(brew --prefix)"
+    fi
+
+    # 2. Check/install smbclient
     if ! command -v smbclient &>/dev/null; then
         echo "smbclient not found. Installing samba via Homebrew..."
-        if command -v brew &>/dev/null; then
-            brew install samba
+        brew install samba
+        if command -v smbclient &>/dev/null; then
+            echo "[OK] smbclient installed"
         else
-            echo "Homebrew not found. Please install samba manually: brew install samba"
+            echo "[ERROR] samba installation failed"
             return 1
         fi
     else
         echo "[OK] smbclient found: $(which smbclient)"
     fi
 
-    # 2. Create config directory with defaults
+    # 3. Create config directory with defaults
     ensure_config_dir
     ensure_exclusions
     echo "[OK] Config directory: $CONFIG_DIR"
 
-    # 3. Symlink script
+    # 4. Symlink script
     local script_path
     script_path="$(cd "$(dirname "$0")" && pwd)/$(basename "$0")"
 
@@ -680,7 +701,7 @@ cmd_install() {
         echo "[OK] Symlinked to $INSTALL_PATH"
     fi
 
-    # 4. Generate and load LaunchAgent
+    # 5. Generate and load LaunchAgent
     cat > "$PLIST_PATH" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -718,7 +739,7 @@ PLIST
     echo "=== Installation complete ==="
     echo
 
-    # 5. Check if servers configured
+    # 6. Check if servers configured
     if [[ -z "$(list_servers)" ]]; then
         echo "No servers configured yet. Add one now:"
         echo "  smb-mount server add GOXSRV01 10.88.3.1 --domain gox.ca --user jcproulx"
