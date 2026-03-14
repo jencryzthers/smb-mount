@@ -178,18 +178,25 @@ discover_shares() {
         return 1
     fi
 
-    # Run smbclient -L to list shares
-    # Try Keychain password first (via security find-internet-password)
+    # Try to find password from Keychain — macOS stores under various keys
+    # (server name, lowercase, IP address, hostname variants)
     local password=""
-    password="$(security find-internet-password -s "$server_name" -a "$user" -w 2>/dev/null)" || true
+    local keychain_lookups=("$server_name" "${server_name:l}" "$ip")
+    for kc_server in "${keychain_lookups[@]}"; do
+        password="$(security find-internet-password -s "$kc_server" -a "$user" -w 2>/dev/null)" || true
+        [[ -n "$password" ]] && break
+        # Also try without account filter (Finder sometimes stores with different account name)
+        password="$(security find-internet-password -s "$kc_server" -w 2>/dev/null)" || true
+        [[ -n "$password" ]] && break
+    done
 
+    # Run smbclient -L to list shares
     local smb_output=""
     if [[ -n "$password" ]]; then
-        smb_output="$(smbclient -L "//$ip" -U "$domain/$user%$password" --no-pass 2>/dev/null)" || \
-        smb_output="$(smbclient -L "//$ip" -U "$domain/$user" --password="$password" 2>/dev/null)" || true
+        smb_output="$(smbclient -L "//$ip" -U "$domain/$user%$password" 2>/dev/null)" || true
     fi
 
-    # If no password or smbclient failed, try without (Kerberos/guest)
+    # If no password or smbclient failed, try without password (Kerberos/guest)
     if [[ -z "$smb_output" ]]; then
         smb_output="$(smbclient -L "//$ip" -U "$domain/$user" -N 2>/dev/null)" || true
     fi
@@ -298,33 +305,40 @@ mount_share() {
         return 0
     fi
 
-    # If mount failed and interactive, try with explicit password
+    # If mount failed, try with explicit password from Keychain
+    local password=""
+    local kc_lookups=("$server_name" "${server_name:l}" "$ip")
+    for kc_srv in "${kc_lookups[@]}"; do
+        password="$(security find-internet-password -s "$kc_srv" -a "$user" -w 2>/dev/null)" || true
+        [[ -n "$password" ]] && break
+        password="$(security find-internet-password -s "$kc_srv" -w 2>/dev/null)" || true
+        [[ -n "$password" ]] && break
+    done
+
+    # Try mounting with Keychain password
+    if [[ -n "$password" ]]; then
+        if mount_smbfs "//${domain};${user}:${password}@${ip}/${share}" "$mount_point" 2>/dev/null; then
+            log OK "Mounted: $mount_point"
+            return 0
+        fi
+    fi
+
+    # If still failed and interactive, prompt for password
     if [[ -t 0 ]]; then
-        local password=""
-        password="$(security find-internet-password -s "$server_name" -a "$user" -w 2>/dev/null)" || true
+        echo -n "Password for $domain\\$user on $server_name: "
+        read -rs password
+        echo
 
-        if [[ -z "$password" ]]; then
-            echo -n "Password for $domain\\$user on $server_name: "
-            read -rs password
-            echo
-
-            if mount_smbfs "//${domain};${user}:${password}@${ip}/${share}" "$mount_point" 2>/dev/null; then
-                log OK "Mounted: $mount_point"
-                # Offer to save
-                echo -n "Save password to Keychain? [Y/n] "
-                read -r yn
-                if [[ ! "$yn" =~ ^[Nn]$ ]]; then
-                    security add-internet-password -a "$user" -s "$server_name" -D "SMB" -r "smb " -w "$password" -U 2>/dev/null && \
-                        log OK "Password saved to Keychain" || \
-                        log WARN "Failed to save to Keychain"
-                fi
-                return 0
+        if mount_smbfs "//${domain};${user}:${password}@${ip}/${share}" "$mount_point" 2>/dev/null; then
+            log OK "Mounted: $mount_point"
+            echo -n "Save password to Keychain? [Y/n] "
+            read -r yn
+            if [[ ! "$yn" =~ ^[Nn]$ ]]; then
+                security add-internet-password -a "$user" -s "$server_name" -D "SMB" -r "smb " -w "$password" -U 2>/dev/null && \
+                    log OK "Password saved to Keychain" || \
+                    log WARN "Failed to save to Keychain"
             fi
-        else
-            if mount_smbfs "//${domain};${user}:${password}@${ip}/${share}" "$mount_point" 2>/dev/null; then
-                log OK "Mounted: $mount_point"
-                return 0
-            fi
+            return 0
         fi
     fi
 
