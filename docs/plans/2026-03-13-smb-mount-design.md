@@ -104,10 +104,10 @@ smb-mount log
 
 **servers.conf:**
 ```ini
-[GOXSRV01]
-ip=10.88.3.1
-domain=gox.ca
-user=jcproulx
+[FILESERVER01]
+ip=10.0.0.1
+domain=corp.local
+user=jsmith
 ```
 
 **exclusions.conf:**
@@ -130,9 +130,9 @@ SYSVOL
 ## Mount Points
 
 ```
-/Volumes/GOXSRV01/
-├── ShareA/
-├── ShareB/
+/Volumes/FILESERVER01/
+├── SharedDocs/
+├── Projects/
 ├── Apps$/
 └── Data$/
 ```
