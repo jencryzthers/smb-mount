@@ -258,18 +258,24 @@ rotate_log() {
 
 # --- Mount helpers ---
 
+_server_mount_grep() {
+    local server_name="$1"
+    parse_server "$server_name"
+    local ip="${PARSED_SERVER[ip]}"
+    local server_lower="${server_name:l}"
+    mount | grep -i -e "@${server_lower}/" -e "@${ip}/" 2>/dev/null
+}
+
 is_share_mounted() {
     local server_name="$1" share="$2"
-    local server_lower="${server_name:l}"
     local encoded_share="${share//\$/%24}"
-    mount | grep -qi "@${server_lower}/${encoded_share} " 2>/dev/null
+    _server_mount_grep "$server_name" | grep -qi "/${encoded_share} " 2>/dev/null
 }
 
 get_mount_point() {
     local server_name="$1" share="$2"
-    local server_lower="${server_name:l}"
     local encoded_share="${share//\$/%24}"
-    mount | grep -i "@${server_lower}/${encoded_share} " 2>/dev/null | sed 's/.* on //;s/ (smbfs.*//'
+    _server_mount_grep "$server_name" | grep -i "/${encoded_share} " 2>/dev/null | sed 's/.* on //;s/ (smbfs.*//'
 }
 
 mount_share() {
@@ -304,11 +310,16 @@ mount_share() {
     fi
 
     # Mount via osascript (native Finder mount, no sudo)
+    # Use the NetBIOS name from smbutil so Finder sidebar shows the correct uppercase name
+    local netbios_name smb_host
+    netbios_name="$(smbutil status "$ip" 2>/dev/null | awk '/^Server:/{print $2}')"
+    smb_host="${netbios_name:-$ip}"
+
     local smb_url
     if [[ -n "$password" ]]; then
-        smb_url="smb://${domain};${user}:${password}@${server_name}/${share}"
+        smb_url="smb://${domain};${user}:${password}@${smb_host}/${share}"
     else
-        smb_url="smb://${domain};${user}@${server_name}/${share}"
+        smb_url="smb://${domain};${user}@${smb_host}/${share}"
     fi
 
     if osascript -e "mount volume \"${smb_url}\"" &>/dev/null; then
@@ -359,9 +370,8 @@ unmount_share() {
 cleanup_stale() {
     local server_name="$1"
     local discovered_shares="$2"
-    local server_lower="${server_name:l}"
 
-    mount | grep -i "@${server_lower}/" 2>/dev/null | while IFS= read -r line; do
+    _server_mount_grep "$server_name" | while IFS= read -r line; do
         local mount_point="${line#* on }"
         mount_point="${mount_point% \(smbfs*}"
         local url_part="${line%% on *}"
@@ -611,8 +621,7 @@ cmd_mount() {
     local server_name shares share
     for server_name in ${(f)servers}; do
         # Skip if server already has mounts
-        local server_lower="${server_name:l}"
-        if mount | grep -qi "@${server_lower}/" 2>/dev/null; then
+        if _server_mount_grep "$server_name" | grep -q . 2>/dev/null; then
             log INFO "Shares already mounted for $server_name — skipping"
             continue
         fi
@@ -653,8 +662,7 @@ cmd_unmount() {
 
     local server_name
     for server_name in ${(f)servers}; do
-        local server_lower="${server_name:l}"
-        mount | grep -i "@${server_lower}/" 2>/dev/null | while IFS= read -r line; do
+        _server_mount_grep "$server_name" | while IFS= read -r line; do
             local mp="${line#* on }"
             mp="${mp% \(smbfs*}"
             [[ -n "$mp" ]] && unmount_share "$mp"
@@ -677,7 +685,6 @@ cmd_status() {
     local server_name
     for server_name in ${(f)servers}; do
         parse_server "$server_name"
-        local server_lower="${server_name:l}"
 
         local reachable="unreachable"
         if ping -c1 -W2 "${PARSED_SERVER[ip]}" &>/dev/null; then
@@ -688,8 +695,10 @@ cmd_status() {
         [[ "$reachable" == "reachable" ]] && status_color="${GREEN}"
         echo -e "${status_color}[$reachable]${NC} $server_name (${PARSED_SERVER[ip]}) — ${PARSED_SERVER[domain]}\\${PARSED_SERVER[user]}"
 
-        if mount | grep -qi "@${server_lower}/" 2>/dev/null; then
-            mount | grep -i "@${server_lower}/" 2>/dev/null | while IFS= read -r line; do
+        local server_mounts
+        server_mounts="$(_server_mount_grep "$server_name")"
+        if [[ -n "$server_mounts" ]]; then
+            echo "$server_mounts" | while IFS= read -r line; do
                 local mp="${line#* on }"
                 mp="${mp% \(smbfs*}"
                 local sn="${mp:t}"
@@ -986,15 +995,14 @@ cmd_watch() {
         for server_name in ${(f)servers}; do
             parse_server "$server_name"
             local ip="${PARSED_SERVER[ip]}"
-            local server_lower="${server_name:l}"
 
             if ping -c1 -W2 "$ip" &>/dev/null; then
-                if ! mount | grep -qi "@${server_lower}/" 2>/dev/null; then
+                if ! _server_mount_grep "$server_name" | grep -q . 2>/dev/null; then
                     log INFO "Server $server_name now reachable — mounting"
                     cmd_mount "$server_name"
                 fi
             else
-                if mount | grep -qi "@${server_lower}/" 2>/dev/null; then
+                if _server_mount_grep "$server_name" | grep -q . 2>/dev/null; then
                     log INFO "Server $server_name unreachable — unmounting"
                     cmd_unmount "$server_name"
                 fi
