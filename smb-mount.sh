@@ -310,16 +310,11 @@ mount_share() {
     fi
 
     # Mount via osascript (native Finder mount, no sudo)
-    # Use the NetBIOS name from smbutil so Finder sidebar shows the correct uppercase name
-    local netbios_name smb_host
-    netbios_name="$(smbutil status "$ip" 2>/dev/null | awk '/^Server:/{print $2}')"
-    smb_host="${netbios_name:-$ip}"
-
     local smb_url
     if [[ -n "$password" ]]; then
-        smb_url="smb://${domain};${user}:${password}@${smb_host}/${share}"
+        smb_url="smb://${domain};${user}:${password}@${server_name}/${share}"
     else
-        smb_url="smb://${domain};${user}@${smb_host}/${share}"
+        smb_url="smb://${domain};${user}@${server_name}/${share}"
     fi
 
     if osascript -e "mount volume \"${smb_url}\"" &>/dev/null; then
