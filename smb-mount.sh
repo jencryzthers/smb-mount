@@ -1,6 +1,10 @@
 #!/bin/zsh
 set -o pipefail
 
+# --- PATH (LaunchAgent runs with minimal PATH) ---
+[[ -d /opt/homebrew/bin ]] && export PATH="/opt/homebrew/bin:$PATH"
+[[ -d /usr/local/bin ]]    && export PATH="/usr/local/bin:$PATH"
+
 # --- Globals ---
 readonly VERSION="1.1.0"
 readonly CONFIG_DIR="$HOME/.config/smb-mount"
@@ -185,13 +189,15 @@ discover_shares() {
         [[ -n "$password" ]] && break
     done
 
-    local smb_output=""
+    local smb_output="" smb_err=""
     if [[ -n "$password" ]]; then
-        smb_output="$(smbclient -L "//$ip" -U "$domain/$user%$password" 2>/dev/null)" || true
+        smb_output="$(smbclient -L "//$ip" -U "$domain/$user%$password" 2>"$CONFIG_DIR/.smb_err")" || true
+        [[ -z "$smb_output" ]] && smb_err="$(cat "$CONFIG_DIR/.smb_err" 2>/dev/null)"
     fi
 
     if [[ -z "$smb_output" ]]; then
-        smb_output="$(smbclient -L "//$ip" -U "$domain/$user" -N 2>/dev/null)" || true
+        smb_output="$(smbclient -L "//$ip" -U "$domain/$user" -N 2>"$CONFIG_DIR/.smb_err")" || true
+        [[ -z "$smb_output" && -z "$smb_err" ]] && smb_err="$(cat "$CONFIG_DIR/.smb_err" 2>/dev/null)"
     fi
 
     if [[ -z "$smb_output" ]] && [[ -t 0 ]]; then
@@ -211,8 +217,16 @@ discover_shares() {
         fi
     fi
 
+    rm -f "$CONFIG_DIR/.smb_err"
+
     if [[ -z "$smb_output" ]]; then
-        log ERROR "Could not list shares on $server_name — authentication failed"
+        if [[ "$smb_err" == *"UNREACHABLE"* || "$smb_err" == *"Connection to"*"failed"* ]]; then
+            log ERROR "Could not connect to $server_name ($ip) — $smb_err"
+        elif [[ -n "$password" ]]; then
+            log ERROR "Could not list shares on $server_name — authentication failed"
+        else
+            log ERROR "Could not list shares on $server_name — no credentials found"
+        fi
         return 1
     fi
 
@@ -782,31 +796,37 @@ cmd_install() {
     ensure_exclusions
     info "Config directory: $CONFIG_DIR"
 
-    # 4. Symlink script — resolve real path
+    # 4. Copy script to stable local path (iCloud paths are unreliable for launchd)
     local script_path
     script_path="${0:A}"
+    local local_script="$CONFIG_DIR/smb-mount.sh"
 
-    if [[ -L "$INSTALL_PATH" ]] && [[ "$(readlink "$INSTALL_PATH")" == "$script_path" ]]; then
+    cp -f "$script_path" "$local_script"
+    chmod +x "$local_script"
+    info "Copied script to $local_script"
+
+    # 5. Symlink CLI to /usr/local/bin
+    if [[ -L "$INSTALL_PATH" ]] && [[ "$(readlink "$INSTALL_PATH")" == "$local_script" ]]; then
         info "Already installed at $INSTALL_PATH"
     else
         echo "Installing to $INSTALL_PATH..."
         if [[ $EUID -eq 0 ]]; then
-            ln -sf "$script_path" "$INSTALL_PATH"
+            ln -sf "$local_script" "$INSTALL_PATH"
         else
-            sudo ln -sf "$script_path" "$INSTALL_PATH"
+            sudo ln -sf "$local_script" "$INSTALL_PATH"
         fi
-        info "Symlinked $INSTALL_PATH → $script_path"
+        info "Symlinked $INSTALL_PATH → $local_script"
     fi
 
-    # 5. Generate launcher script (avoids launchd issues with spaces in paths)
+    # 6. Generate launcher script for LaunchAgent
     cat > "$LAUNCHER_PATH" <<LAUNCHER
 #!/bin/zsh
-exec /bin/zsh "${script_path}" "\$@"
+exec /bin/zsh "${local_script}" "\$@"
 LAUNCHER
     chmod +x "$LAUNCHER_PATH"
     info "Launcher: $LAUNCHER_PATH"
 
-    # 6. Generate LaunchAgent plist
+    # 7. Generate LaunchAgent plist
     cat > "$PLIST_PATH" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -831,7 +851,7 @@ LAUNCHER
 </plist>
 PLIST
 
-    # 7. Load the agent (must run as user, not root)
+    # 8. Load the agent (must run as user, not root)
     if [[ $EUID -eq 0 ]]; then
         warn "LaunchAgent must be loaded as your user, not root."
         echo "Run this after install:  launchctl load $PLIST_PATH"
@@ -843,7 +863,7 @@ PLIST
 
     echo ""
 
-    # 8. Interactive guided server setup
+    # 9. Interactive guided server setup
     if [[ -z "$(list_servers)" ]]; then
         echo "No servers configured yet. Let's set one up now."
         echo
@@ -970,18 +990,13 @@ cmd_watch() {
     ensure_config_dir
     log INFO "Network watcher started"
 
-    local prev_ifaces=""
-    prev_ifaces="$(scutil --nwi 2>/dev/null | grep '^  ' | sort)"
+    local route_pid=""
+    trap '_watch_cleanup' EXIT INT TERM
+    _watch_cleanup() {
+        [[ -n "$route_pid" ]] && kill "$route_pid" 2>/dev/null
+    }
 
-    _watch_check() {
-        local curr_ifaces
-        curr_ifaces="$(scutil --nwi 2>/dev/null | grep '^  ' | sort)"
-
-        [[ "$curr_ifaces" == "$prev_ifaces" ]] && return
-
-        log INFO "Network change detected"
-        prev_ifaces="$curr_ifaces"
-
+    _watch_mount_check() {
         local servers
         servers="$(list_servers)"
         [[ -z "$servers" ]] && return
@@ -1006,12 +1021,41 @@ cmd_watch() {
     }
 
     # Run initial check
-    _watch_check
+    _watch_mount_check
 
-    # Poll every 5 seconds
+    # Debounce file — route monitor runs in a subshell, so use a file for state
+    local debounce_file="$CONFIG_DIR/.route-trigger"
+
+    # Background: route monitor writes a trigger file on route changes
+    _start_route_monitor() {
+        route -n monitor 2>/dev/null | while IFS= read -r _line; do
+            touch "$debounce_file" 2>/dev/null
+        done
+    }
+    _start_route_monitor &
+    route_pid=$!
+    log INFO "Route monitor started (pid $route_pid)"
+
+    # Main loop: react to trigger file, restart monitor if it dies
+    local cooldown=15  # seconds to wait after a check before accepting new triggers
     while true; do
-        sleep 5
-        _watch_check
+        sleep 3
+        # Check if route monitor flagged a change
+        if [[ -f "$debounce_file" ]]; then
+            rm -f "$debounce_file"
+            log INFO "Route change detected — checking servers"
+            _watch_mount_check
+            # Cooldown: discard triggers that fired during the check
+            rm -f "$debounce_file"
+            sleep $cooldown
+            rm -f "$debounce_file"
+        fi
+        # Restart route monitor if it died
+        if ! kill -0 "$route_pid" 2>/dev/null; then
+            log WARN "Route monitor exited — restarting"
+            _start_route_monitor &
+            route_pid=$!
+        fi
     done
 }
 
