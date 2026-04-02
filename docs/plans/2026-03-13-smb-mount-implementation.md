@@ -147,7 +147,7 @@ ensure_config_dir() {
 }
 
 # Parse servers.conf — sets associative arrays for each server
-# Usage: local -A server; parse_server "GOXSRV01" server
+# Usage: local -A server; parse_server "FILESVR01" server
 parse_server() {
     local name="$1"
     local -n ref="$2"
@@ -319,14 +319,14 @@ cmd_server_remove() {
 
 **Step 3: Test the server subcommands**
 
-Run: `./smb-mount.sh server add GOXSRV01 10.88.3.1 --domain gox.ca --user jcproulx`
-Expected: `[OK] Server added: GOXSRV01 (10.88.3.1) — gox.ca\jcproulx`
+Run: `./smb-mount.sh server add FILESVR01 10.0.0.1 --domain corp.local --user jsmith`
+Expected: `[OK] Server added: FILESVR01 (10.0.0.1) — corp.local\jsmith`
 
 Run: `cat ~/.config/smb-mount/servers.conf`
-Expected: INI section with [GOXSRV01] and ip/domain/user keys
+Expected: INI section with [FILESVR01] and ip/domain/user keys
 
 Run: `./smb-mount.sh server list`
-Expected: Formatted table showing GOXSRV01
+Expected: Formatted table showing FILESVR01
 
 Run: `./smb-mount.sh server add TESTSVR 10.0.0.1 --domain test.local --user admin`
 Run: `./smb-mount.sh server list`
@@ -336,7 +336,7 @@ Run: `./smb-mount.sh server remove TESTSVR`
 Expected: `[OK] Server removed: TESTSVR`
 
 Run: `./smb-mount.sh server list`
-Expected: Only GOXSRV01 remains
+Expected: Only FILESVR01 remains
 
 **Step 4: Commit**
 
@@ -497,9 +497,9 @@ cmd_shares() {
 
 **Step 3: Test share discovery**
 
-Prerequisite: `smbclient` must be installed and GOXSRV01 server configured from Task 2.
+Prerequisite: `smbclient` must be installed and FILESVR01 server configured from Task 2.
 
-Run: `./smb-mount.sh shares GOXSRV01`
+Run: `./smb-mount.sh shares FILESVR01`
 Expected: List of discovered shares (excluding IPC$, ADMIN$, etc.)
 
 Run: `./smb-mount.sh shares NONEXISTENT`
@@ -754,15 +754,15 @@ cmd_unmount() {
 
 **Step 3: Test mount and unmount**
 
-Prerequisite: GOXSRV01 configured and reachable.
+Prerequisite: FILESVR01 configured and reachable.
 
-Run: `./smb-mount.sh mount GOXSRV01`
-Expected: Shares discovered and mounted under /Volumes/GOXSRV01/
+Run: `./smb-mount.sh mount FILESVR01`
+Expected: Shares discovered and mounted under /Volumes/FILESVR01/
 
-Run: `ls /Volumes/GOXSRV01/`
+Run: `ls /Volumes/FILESVR01/`
 Expected: Share directories visible
 
-Run: `./smb-mount.sh unmount GOXSRV01`
+Run: `./smb-mount.sh unmount FILESVR01`
 Expected: All shares unmounted, directories cleaned up
 
 **Step 4: Commit**
@@ -965,7 +965,7 @@ PLIST
     # 5. Check if servers configured
     if [[ -z "$(list_servers)" ]]; then
         echo "No servers configured yet. Add one now:"
-        echo "  smb-mount server add GOXSRV01 10.88.3.1 --domain gox.ca --user jcproulx"
+        echo "  smb-mount server add FILESVR01 10.0.0.1 --domain corp.local --user jsmith"
     else
         echo "Configured servers:"
         cmd_server_list
@@ -1087,10 +1087,10 @@ Update the Testing section and add a Quickstart section reflecting the completed
 ./smb-mount.sh install
 
 # Add server
-smb-mount server add GOXSRV01 10.88.3.1 --domain gox.ca --user jcproulx
+smb-mount server add FILESVR01 10.0.0.1 --domain corp.local --user jsmith
 
 # Discover
-smb-mount shares GOXSRV01
+smb-mount shares FILESVR01
 
 # Mount
 smb-mount mount
@@ -1099,7 +1099,7 @@ smb-mount mount
 smb-mount status
 
 # Check Finder
-open /Volumes/GOXSRV01
+open /Volumes/FILESVR01
 
 # Unmount
 smb-mount unmount
